@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LaTeX IDE</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.9.6/ace.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.9.6/ext-language_tools.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.9.359/pdf.min.js"></script>
+    <style>
+      #editor {
+        position: relative;
+        width: 100%;
+        height: 100%;
+      }
+      #preview {
+        max-height: calc(100vh - 8rem); /* Adjust this value as needed */
+        overflow-y: auto;
+      }
+    </style>
+  </head>
+  <body class="h-full flex flex-col bg-gray-100">
+    <nav class="bg-gray-800 text-white p-4">
+      <div class="flex justify-between items-center">
+        <h1 class="text-xl font-bold">LaTeX IDE</h1>
+        <div>
+          <button
+            id="compile-btn"
+            class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+          >
+            Compile
+          </button>
+          <button
+            id="download-btn"
+            class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 ml-2 hidden"
+          >
+            Download PDF
+          </button>
+        </div>
+      </div>
+    </nav>
+
+    <div class="flex-grow flex">
+      <div class="flex-grow flex">
+        <div class="w-1/2 p-4">
+          <div id="editor" class="w-full h-full border rounded"></div>
+          <div class="mt-2">
+            <label class="inline-flex items-center">
+              <input type="checkbox" id="auto-compile" class="form-checkbox" />
+              <span class="ml-2">Auto-compile</span>
+            </label>
+          </div>
+        </div>
+        <div class="w-1/2 p-4">
+          <div
+            id="preview"
+            class="w-full h-full border rounded bg-white overflow-auto"
+          ></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="status" class="bg-gray-300 p-2 text-sm"></div>
+
+    <script>
+      const editor = ace.edit("editor");
+      editor.setTheme("ace/theme/monokai");
+      editor.session.setMode("ace/mode/latex");
+      editor.setOptions({
+        enableBasicAutocompletion: true,
+        enableSnippets: true,
+        enableLiveAutocompletion: true,
+      });
+
+      const preview = document.getElementById("preview");
+      const compileBtn = document.getElementById("compile-btn");
+      const downloadBtn = document.getElementById("download-btn");
+      const saveBtn = document.getElementById("save-btn");
+      const status = document.getElementById("status");
+      const autoCompile = document.getElementById("auto-compile");
+
+      let currentFile = null;
+      let pdfUrl = "";
+      let compileTimeout;
+
+      async function fetchProjectStructure() {
+        const response = await fetch("/files");
+        const files = await response.json();
+        renderProjectStructure(files);
+      }
+
+      function renderProjectStructure(files) {
+        projectStructure.innerHTML = "";
+        files.forEach((file) => {
+          const li = document.createElement("li");
+          li.innerHTML = `
+                    <span class="cursor-pointer" onclick="toggleFolder(this)">
+                        ${file.type === "directory" ? "📁" : "📄"} ${file.name}
+                    </span>
+                `;
+          if (file.type === "file") {
+            li.onclick = () => openFile(file.path);
+          }
+          projectStructure.appendChild(li);
+        });
+      }
+
+      async function openFile(path) {
+        const response = await fetch(`/files/${path}`);
+        const data = await response.json();
+        editor.setValue(data.content);
+        currentFile = path;
+      }
+
+      async function saveFile() {
+        if (!currentFile) {
+          status.textContent = "No file selected";
+          return;
+        }
+        const content = editor.getValue();
+        const response = await fetch(`/files/${currentFile}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ content }),
+        });
+        if (response.ok) {
+          status.textContent = "File saved successfully";
+        } else {
+          status.textContent = "Failed to save file";
+        }
+      }
+
+      function createNewFile() {
+        const name = prompt("Enter file name:");
+        if (name) {
+          fetch("/files", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ name, type: "file", path: "" }),
+          }).then(() => fetchProjectStructure());
+        }
+      }
+
+      function createNewFolder() {
+        const name = prompt("Enter folder name:");
+        if (name) {
+          fetch("/files", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ name, type: "directory", path: "" }),
+          }).then(() => fetchProjectStructure());
+        }
+      }
+
+      // LaTeX-specific autocompletion
+      const latexCompleter = {
+        getCompletions: function (editor, session, pos, prefix, callback) {
+          const latexKeywords = [
+            "\\begin",
+            "\\end",
+            "\\documentclass",
+            "\\usepackage",
+            "\\section",
+            "\\subsection",
+            "\\paragraph",
+            "\\textbf",
+            "\\textit",
+            "\\underline",
+            "\\emph",
+            "\\cite",
+            "\\ref",
+          ];
+          callback(
+            null,
+            latexKeywords.map(function (word) {
+              return {
+                caption: word,
+                value: word,
+                meta: "LaTeX",
+              };
+            })
+          );
+        },
+      };
+      editor.completers.push(latexCompleter);
+
+      async function compileLaTeX() {
+        const latex = editor.getValue();
+        status.textContent = "Compiling...";
+        status.className = "bg-gray-300 p-2 text-sm text-blue-500";
+        downloadBtn.classList.add("hidden");
+
+        try {
+          const response = await fetch("/compile", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ latex }),
+          });
+
+          if (!response.ok) {
+            throw new Error("Compilation failed");
+          }
+
+          const result = await response.json();
+
+          if (result.error) {
+            throw new Error(result.error);
+          }
+
+          // Display PDF
+          const pdfData = atob(result.pdf);
+          const uint8Array = new Uint8Array(pdfData.length);
+          for (let i = 0; i < pdfData.length; ++i) {
+            uint8Array[i] = pdfData.charCodeAt(i);
+          }
+
+          const loadingTask = pdfjsLib.getDocument({ data: uint8Array });
+          const pdf = await loadingTask.promise;
+          const page = await pdf.getPage(1);
+          const scale = 1.5;
+          const viewport = page.getViewport({ scale });
+
+          const canvas = document.createElement("canvas");
+          const context = canvas.getContext("2d");
+          canvas.height = viewport.height;
+          canvas.width = viewport.width;
+
+          const renderContext = {
+            canvasContext: context,
+            viewport: viewport,
+          };
+
+          await page.render(renderContext);
+
+          preview.innerHTML = "";
+          preview.appendChild(canvas);
+
+          status.textContent = "Compilation successful!";
+          status.className = "bg-gray-300 p-2 text-sm text-green-500";
+
+          pdfUrl = result.downloadUrl;
+          downloadBtn.classList.remove("hidden");
+        } catch (error) {
+          status.textContent = `Error: ${error.message}`;
+          status.className = "bg-gray-300 p-2 text-sm text-red-500";
+          preview.innerHTML = `<p class="text-red-500 p-4">Compilation failed. Please check your LaTeX code and try again.</p>`;
+        }
+      }
+
+      compileBtn.addEventListener("click", compileLaTeX);
+
+      downloadBtn.addEventListener("click", () => {
+        if (pdfUrl) {
+          window.location.href = pdfUrl;
+        }
+      });
+
+      editor.session.on("change", function () {
+        if (autoCompile.checked) {
+          clearTimeout(compileTimeout);
+          compileTimeout = setTimeout(compileLaTeX, 2000); // Compile after 2 seconds of inactivity
+        }
+      });
+
+      function toggleFolder(element) {
+        const sublist = element.nextElementSibling;
+        if (sublist) {
+          sublist.classList.toggle("hidden");
+        }
+      }
+
+      // Initial LaTeX template
+      editor.setValue(`\\documentclass{article}
+\\usepackage{amsmath}
+\\usepackage{graphicx}
+
+\\title{LaTeX IDE Example}
+\\author{Your Name}
+\\date{\\today}
+
+\\begin{document}
+
+\\maketitle
+
+\\section{Introduction}
+Demo LATEX code to start
+
+\\end{document}`);
+
+      // Initial compilation
+      compileLaTeX();
+      fetchProjectStructure();
+    </script>
+  </body>
+</html>
